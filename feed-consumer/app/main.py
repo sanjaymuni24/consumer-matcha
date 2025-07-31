@@ -31,6 +31,7 @@ stop_event = threading.Event()  # Event to signal threads to stop
 kafka_consumer = None  # Reference to the Kafka consumer
 datasource_details=None
 csv_consumer = None 
+health_threads = []  
 # Add this function to handle different modes
 # @app.on_event("startup")
 def start_application_mode(mode):
@@ -74,14 +75,16 @@ def fetch_campaign_details():
                     kafka_config = {
                         "brokers": os.getenv("KAFKA_BROKERS", "localhost:9092"),
                         "group_id": f"campaign-evaluator-{datasource['internal_name']}",
-                        "auto_offset_reset": "earliest"
+                        "auto_offset_reset": "earliest",
+                        "topic": os.getenv("KAFKA_TOPIC", "qualified_events"),
                     }
                     db_config = {
                         "host": os.getenv("DB_HOST", "localhost"),
                         "port": os.getenv("DB_PORT", 5432),
-                        "user": os.getenv("DB_USER", "user"),
-                        "password": os.getenv("DB_PASSWORD", "password"),
-                        "database": os.getenv("DB_NAME", "database")
+                        "user": os.getenv("DB_USER", "pgadmin"),
+                        "password": os.getenv("DB_PASSWORD", "adminpass"),
+                        "database": os.getenv("DB_NAME", "postgres"),
+                        "table": os.getenv("DB_TABLE", "qualified_events")
                     }
 
                     campaign_evaluator = CampaignEvaluator(
@@ -240,13 +243,14 @@ def start_consuming_and_enriching(datasource_details):
             print(f"  Has header: {has_header}")
             
             # Start the health beacon in a separate thread for CSV
-            try:
-                print("Starting health beacon for CSV in a separate thread...")
-                health_thread = threading.Thread(target=health_beacon, args=(datasource_details,))
-                health_thread.daemon = True
-                health_thread.start()
-            except Exception as e:
-                print(f"Error starting health beacon: {e}")
+            # try:
+            #     print("Starting health beacon for CSV in a separate thread...")
+            #     health_thread = threading.Thread(target=health_beacon, args=(datasource_details,))
+            #     health_thread.daemon = True
+            #     health_thread.start()
+            #     health_threads.append(health_thread) 
+            # except Exception as e:
+            #     print(f"Error starting health beacon: {e}")
             
             # Create and start the CSV consumer
             csv_consumer = CSVConsumer(
@@ -317,10 +321,13 @@ def graceful_shutdown():
 stop_event = threading.Event()  # Event to signal threads to stop
 kafka_consumer = None  # Reference to the Kafka consumer
 app_pid = os.getpid()  # Store the process ID when the module is loaded
-
+def list_active_threads():
+    print("Active threads:")
+    for thread in threading.enumerate():
+        print(f"Thread Name: {thread.name}, Daemon: {thread.daemon}, Alive: {thread.is_alive()}")
 def cleanup_resources():
     """Clean up all resources when the application is shutting down."""
-    global kafka_consumer, stop_event,datasource_details
+    global kafka_consumer, stop_event, datasource_details, health_threads
 
     # Only clean up in the process that initialized these resources
     if os.getpid() != app_pid:
@@ -331,11 +338,20 @@ def cleanup_resources():
     try:
         # Signal threads to stop
         stop_event.set()
+        list_active_threads()
 
         # Stop Kafka consumer
         if kafka_consumer:
             kafka_consumer.stop()
 
+        # Stop and join health beacon threadss
+        for thread in health_threads:
+            print(f"Joining thread: {thread.name}")
+            thread.join(timeout=5)  # Wait for the thread to exit
+            if thread.is_alive():
+                print(f"Thread {thread.name} did not exit properly.")
+        print("All health beacon threads stopped.")
+        list_active_threads()
         # Remove Redis entries for the application_registry
         try:
             redis_host = os.getenv("DATASTORE_REDIS_HOST", "localhost")
@@ -365,14 +381,13 @@ def cleanup_resources():
                 redis_conn.delete(profile_key)
 
             print(f"Removed Redis entries for {instance_key} and {profile_key} (if no instances remain).")
-
+        
         except Exception as e:
             print(f"Error removing Redis entries: {e}")
 
         print("All resources cleaned up")
     except Exception as e:
-        print(f"Error during cleanup: {e}")# Register cleanup with atexit
-
+        print(f"Error during cleanup: {e}")
 atexit.register(cleanup_resources)
 # Signal handler
 def signal_handler(signum, frame):
@@ -456,7 +471,7 @@ def health_beacon(datasource_details):
     health_thread = threading.Thread(target=send_health_data)
     health_thread.daemon = True
     health_thread.start()
-
+    health_threads.append(health_thread) 
 
 
 if __name__ == "__main__":
